@@ -53,8 +53,7 @@ echo
 echo "Parsing subtitle file..."
 # Extract start times from VTT or SRT subtitle file
 # This command extracts lines that contain '-->', then uses sed to keep only the start time.
-# It also removes milliseconds for simplicity.
-cat "$SUBTITLE_FILE" | grep -- '-->' | sed 's/ -->.*//' | sed 's/,[0-9]\{3\}//' > "$TMP_DIR/start_times.txt"
+cat "$SUBTITLE_FILE" | grep -- '-->' | sed 's/ -->.*//' > "$TMP_DIR/start_times.txt"
 
 if [ ! -s "$TMP_DIR/start_times.txt" ]; then
     echo "Error: Could not extract any timestamps from the subtitle file."
@@ -79,7 +78,13 @@ chmod +x "$EXTRACT_FRAMES_SCRIPT"
 paste -d, "$TMP_DIR/start_times.txt" <(tail -n +2 "$TMP_DIR/start_times.txt"; echo "$VIDEO_DURATION") | \
 awk -F, -v video_file="$VIDEO_FILE" -v tmp_dir="$TMP_DIR" -v extract_script="$EXTRACT_FRAMES_SCRIPT" '
 function time_to_seconds(time_str) {
-    split(time_str, parts, ":");
+    # Split time into seconds and milliseconds
+    split(time_str, time_parts, ".");
+    seconds_part = time_parts[1];
+    milliseconds = time_parts[2];
+
+    # Split seconds part into h, m, s
+    split(seconds_part, parts, ":");
     hours = 0;
     minutes = 0;
     seconds = 0;
@@ -91,7 +96,7 @@ function time_to_seconds(time_str) {
         minutes = parts[1];
         seconds = parts[2];
     }
-    return hours * 3600 + minutes * 60 + seconds;
+    return hours * 3600 + minutes * 60 + seconds + (milliseconds / 1000);
 }
 
 {
