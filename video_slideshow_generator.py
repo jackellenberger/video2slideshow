@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--min_frame_length', type=float, default=0.1, help='Minimum duration for a frame.')
     parser.add_argument('--max_frame_length', type=float, default=10.0, help='Maximum duration for a frame.')
     parser.add_argument('--dialogue_offset', type=float, default=0.0, help='Offset for frame extraction time relative to subtitle activation.')
+    parser.add_argument('--fade_duration', type=float, default=0.0, help='Duration of the fade-in and fade-out effect in seconds.')
 
     args = parser.parse_args()
 
@@ -67,12 +68,33 @@ def main():
 
         # Create the video slideshow
         video_only_file = os.path.join(tmp_dir, 'video_only.mp4')
-        (
-            ffmpeg
-            .input(concat_list_file, format='concat', safe=0)
-            .output(video_only_file, c='libx264', r=24, pix_fmt='yuv420p')
-            .run()
-        )
+        if args.fade_duration > 0 and len(frame_paths) > 1:
+            # Use xfade filter for transitions
+            fade_duration = args.fade_duration
+
+            # Create a list of video parts
+            video_parts = []
+            for i, frame_path in enumerate(frame_paths):
+                video_parts.append(ffmpeg.input(frame_path).video)
+
+            # Chain the xfade filters
+            processed_video = video_parts[0]
+            for i in range(1, len(video_parts)):
+                processed_video = ffmpeg.filter([processed_video, video_parts[i]], 'xfade', transition='fade', duration=fade_duration, offset=sum(f['duration'] for f in frames_to_extract[:i]) - fade_duration)
+
+            (
+                ffmpeg
+                .output(processed_video, video_only_file, c='libx264', r=24, pix_fmt='yuv420p')
+                .run(overwrite_output=True)
+            )
+        else:
+            # Use concat for no transitions
+            (
+                ffmpeg
+                .input(concat_list_file, format='concat', safe=0)
+                .output(video_only_file, c='libx264', r=24, pix_fmt='yuv420p')
+                .run(overwrite_output=True)
+            )
 
         # Merge video with original audio
         input_video = ffmpeg.input(video_only_file)
