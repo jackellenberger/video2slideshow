@@ -18,6 +18,7 @@ def main():
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable ffmpeg output.')
     parser.add_argument('--hwaccel', choices=['nvenc', 'none'], default='none', help='Hardware acceleration method.')
     parser.add_argument('--keep-original-video', action='store_true', help='Keep the original video stream in the output MKV.')
+    parser.add_argument('--preview', type=float, help='Only process the first N seconds of the video.')
 
     args = parser.parse_args()
 
@@ -34,6 +35,8 @@ def main():
         # Get video duration
         probe = ffmpeg.probe(args.input_file)
         video_duration = float(probe['format']['duration'])
+        if args.preview and args.preview < video_duration:
+            video_duration = args.preview
 
         # Find and extract subtitle streams
         subtitle_streams = [s for s in probe['streams'] if s['codec_type'] == 'subtitle']
@@ -67,6 +70,8 @@ def main():
             # Parse the subtitle file
             try:
                 captions = webvtt.read(subtitle_file)
+                if args.preview:
+                    captions = [c for c in captions if c.start_in_seconds < args.preview]
             except Exception as e:
                 print(f"Error parsing subtitle file {subtitle_file}: {e}")
                 continue
@@ -183,6 +188,8 @@ def main():
             for i in range(len(slideshow_files)):
                 command.extend(['-map', f'{i}:v'])
                 video_maps += 1
+            if args.preview:
+                command.extend(['-t', str(args.preview)])
             command.extend(['-map', f'{len(slideshow_files)}:a?']) # Optional audio
             command.extend(['-map', f'{len(slideshow_files)}:s?']) # Optional subtitles
 
