@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--max_frame_length', type=float, default=10.0, help='Maximum duration for a frame.')
     parser.add_argument('--dialogue_offset', type=float, default=0.0, help='Offset for frame extraction time relative to subtitle activation.')
     parser.add_argument('--fade_duration', type=float, default=0.0, help='Duration of the fade-in and fade-out effect in seconds.')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable ffmpeg output.')
 
     args = parser.parse_args()
 
@@ -43,14 +44,12 @@ def main():
         for i, stream in enumerate(subtitle_streams):
             subtitle_file = os.path.join(tmp_dir, f"subtitle_{i}.vtt")
             try:
-                (
-                    ffmpeg
-                    .input(args.input_file)
-                    .output(subtitle_file, map=f"0:s:{i}")
-                    .run(overwrite_output=True)
-                )
+                command = ['ffmpeg', '-i', args.input_file, '-map', f'0:s:{i}', subtitle_file, '-y']
+                if not args.verbose:
+                    command.extend(['-loglevel', 'quiet'])
+                subprocess.run(command, check=True)
                 subtitle_files.append(subtitle_file)
-            except ffmpeg.Error as e:
+            except (ffmpeg.Error, subprocess.CalledProcessError) as e:
                 print(f"Error extracting subtitle stream {i}: {e.stderr}")
                 continue
 
@@ -91,7 +90,7 @@ def main():
 
             # Extract frames in parallel
             pool = Pool()
-            frame_paths = pool.starmap(extract_frame, [(args.input_file, frame['start_time'], os.path.join(tmp_dir, f"frame_{subtitle_index}_{i:04d}.png")) for i, frame in enumerate(frames_to_extract)])
+            frame_paths = pool.starmap(extract_frame, [(args.input_file, frame['start_time'], os.path.join(tmp_dir, f"frame_{subtitle_index}_{i:04d}.png"), args.verbose) for i, frame in enumerate(frames_to_extract)])
             pool.close()
             pool.join()
 
@@ -118,48 +117,20 @@ def main():
                 for i in range(1, len(video_parts)):
                     processed_video = ffmpeg.filter([processed_video, video_parts[i]], 'xfade', transition='fade', duration=fade_duration, offset=sum(f['duration'] for f in frames_to_extract[:i]) - fade_duration)
 
-                (
-                    ffmpeg
-                    .output(processed_video, video_only_file, c='libx264', r=24, pix_fmt='yuv420p')
-                    .run(overwrite_output=True)
-                )
+                command = ['ffmpeg', '-i', processed_video, '-c', 'libx264', '-r', '24', '-pix_fmt', 'yuv420p', video_only_file, '-y']
+                if not args.verbose:
+                    command.extend(['-loglevel', 'quiet'])
+                subprocess.run(command, check=True)
             else:
                 # Use concat for no transitions
-                (
-                    ffmpeg
-                    .input(concat_list_file, format='concat', safe=0)
-                    .output(video_only_file, c='libx264', r=24, pix_fmt='yuv420p')
-                    .run(overwrite_output=True)
-                )
+                command = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list_file, '-c', 'libx264', '-r', '24', '-pix_fmt', 'yuv420p', video_only_file, '-y']
+                if not args.verbose:
+                    command.extend(['-loglevel', 'quiet'])
+                subprocess.run(command, check=True)
             slideshow_files.append(video_only_file)
 
         # Merge slideshows and audio into a single MKV file
         if slideshow_files:
-            input_videos = [ffmpeg.input(f) for f in slideshow_files]
-            input_audio = ffmpeg.input(args.input_file).audio
-
-            output_streams = []
-            output_metadata = {}
-            for i, video in enumerate(input_videos):
-                output_streams.append(video.video)
-                stream_index = len(output_streams) -1
-                lang = subtitle_streams[i].get('tags', {}).get('language', 'und')
-                output_metadata[f"s:v:{stream_index}"] = {"language": lang}
-
-
-            output_streams.append(input_audio)
-
-            output_streams.append(input_audio)
-
-            kwargs = {'c': 'copy', 'shortest': None}
-            for i, stream in enumerate(subtitle_streams):
-                lang = stream.get('tags', {}).get('language', 'und')
-                kwargs[f'metadata:s:v:{i}'] = f"language={lang}"
-            maps = []
-            for i in range(len(slideshow_files)):
-                maps.append(f'{i}:v')
-            maps.append(f'{len(slideshow_files)}:a')
-
             command = ['ffmpeg']
             for f in slideshow_files:
                 command.extend(['-i', f])
@@ -174,6 +145,8 @@ def main():
                 command.extend([f'-metadata:s:v:{i}', f"language={lang}"])
 
             command.extend(['-c', 'copy', args.output_file, '-y'])
+            if not args.verbose:
+                command.extend(['-loglevel', 'quiet'])
             subprocess.run(command, check=True)
 
         print(f"Slideshow created successfully: {args.output_file}")
@@ -183,13 +156,11 @@ def main():
         shutil.rmtree(tmp_dir)
 
 
-def extract_frame(input_file, start_time, output_file):
-    (
-        ffmpeg
-        .input(input_file, ss=start_time)
-        .output(output_file, vframes=1, q='2')
-        .run()
-    )
+def extract_frame(input_file, start_time, output_file, verbose):
+    command = ['ffmpeg', '-ss', str(start_time), '-i', input_file, '-vframes', '1', '-q', '2', output_file, '-y']
+    if not verbose:
+        command.extend(['-loglevel', 'quiet'])
+    subprocess.run(command, check=True)
     return output_file
 
 
