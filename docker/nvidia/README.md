@@ -31,6 +31,12 @@ docker run --gpus all \
     -o /output/slideshow.mp4
 ```
 
+or if you're me,
+
+```bash
+docker run --gpus all -v "/mnt/c/Users/jacka/Downloads":/input   -v "/mnt/c/Users/jacka/Documents/github/video2slideshow":/output   video-slideshow-nvidia   "/input/Porco Rosso (1992) 1080p AAC.mkv"   -o "/output/porco_rosso_nvidia_500.mkv"   --max_frame_length 5   --hwaccel nvenc   --preview 500
+```
+
 **Explanation:**
 
 - `docker run --gpus all`: This flag enables the container to access the host's NVIDIA GPU.
