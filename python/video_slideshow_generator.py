@@ -28,6 +28,7 @@ def main():
     print(f"Temporary directory: {tmp_dir}")
 
     try:
+        print("Probing video file...")
         # Get video duration
         probe = ffmpeg.probe(args.input_file)
         video_duration = float(probe['format']['duration'])
@@ -42,6 +43,7 @@ def main():
 
         subtitle_files = []
         for i, stream in enumerate(subtitle_streams):
+            print(f"Extracting subtitle stream {i}...")
             subtitle_file = os.path.join(tmp_dir, f"subtitle_{i}.vtt")
             try:
                 command = ['ffmpeg', '-i', args.input_file, '-map', f'0:s:{i}', subtitle_file, '-y']
@@ -50,7 +52,7 @@ def main():
                 subprocess.run(command, check=True)
                 subtitle_files.append(subtitle_file)
             except (ffmpeg.Error, subprocess.CalledProcessError) as e:
-                print(f"Error extracting subtitle stream {i}: {e.stderr}")
+                print(f"Error extracting subtitle stream {i}: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
                 continue
 
         if not subtitle_files:
@@ -59,6 +61,7 @@ def main():
 
         slideshow_files = []
         for subtitle_index, subtitle_file in enumerate(subtitle_files):
+            print(f"Generating slideshow for subtitle track {subtitle_index}...")
             # Parse the subtitle file
             try:
                 captions = webvtt.read(subtitle_file)
@@ -131,6 +134,7 @@ def main():
 
         # Merge slideshows and audio into a single MKV file
         if slideshow_files:
+            print("Merging slideshows into a single MKV file...")
             command = ['ffmpeg']
             for f in slideshow_files:
                 command.extend(['-i', f])
