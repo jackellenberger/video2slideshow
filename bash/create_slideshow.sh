@@ -12,9 +12,9 @@ DEFAULT_OUTPUT_FILE="slideshow.mp4"
 
 # --- Functions ---
 function print_usage() {
-    echo "Usage: $0 <video_file> <subtitle_file> [output_file]"
-    echo "  <video_file>: Path to the input video file."
-    echo "  <subtitle_file>: Path to the input subtitle file (VTT or SRT format)."
+    echo "Usage: $0 <video_file> [subtitle_file] [output_file]"
+    echo "  <video_file>: Path to the input video file. If it's an MKV, subtitles are extracted automatically."
+    echo "  [subtitle_file]: Path to the input subtitle file (VTT or SRT format). Required for non-MKV files."
     echo "  [output_file]: (Optional) Path to the output video file. Defaults to '$DEFAULT_OUTPUT_FILE'."
 }
 
@@ -30,12 +30,38 @@ function check_dependencies() {
 # --- Main Script ---
 check_dependencies
 
-if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
     print_usage
     exit 1
 fi
 
 VIDEO_FILE="$1"
+
+# If the input is an MKV, use the Python script.
+if [[ "$VIDEO_FILE" == *.mkv ]]; then
+    echo "MKV file detected. Using Python script."
+    # The Python script handles its own arguments.
+    # Pass all arguments except the first one (the script name) to the Python script.
+    ARGS=("$1")
+    if [ -n "$2" ]; then
+        ARGS+=("-o" "$2")
+    fi
+    for arg in "$@"; do
+        if [ "$arg" == "--keep-original-video" ]; then
+            ARGS+=("--keep-original-video")
+        fi
+    done
+    python3 python/video_slideshow_generator.py "${ARGS[@]}"
+    exit 0
+fi
+
+# The rest of the script is for non-MKV files and requires a subtitle file.
+if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
+    echo "For non-MKV files, you must provide a subtitle file."
+    print_usage
+    exit 1
+fi
+
 SUBTITLE_FILE="$2"
 OUTPUT_FILE="${3:-$DEFAULT_OUTPUT_FILE}"
 TMP_DIR=$(mktemp -d)

@@ -193,9 +193,16 @@ def main():
             command.extend(['-map', f'{len(slideshow_files)}:a?']) # Optional audio
             command.extend(['-map', f'{len(slideshow_files)}:s?']) # Optional subtitles
 
+            video_stream_index = 0
+            if args.keep_original_video:
+                command.extend(['-metadata:s:v:0', 'title=Original Video'])
+                video_stream_index += 1
+
             for i, stream in enumerate(subtitle_streams):
                 lang = stream.get('tags', {}).get('language', 'und')
-                command.extend([f'-metadata:s:v:{i+video_maps-1}', f"language={lang}"])
+                title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {i}')
+                command.extend([f'-metadata:s:v:{video_stream_index}', f"language={lang}", f'-metadata:s:v:{video_stream_index}', f"title={title}"])
+                video_stream_index += 1
             command.extend([
                 '-c:v', 'copy',
                 '-c:a', 'copy',
