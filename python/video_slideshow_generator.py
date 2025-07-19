@@ -16,6 +16,8 @@ def main():
     parser.add_argument('--dialogue_offset', type=float, default=0.0, help='Offset for frame extraction time relative to subtitle activation.')
     parser.add_argument('--fade_duration', type=float, default=0.0, help='Duration of the fade-in and fade-out effect in seconds.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable ffmpeg output.')
+    parser.add_argument('--hwaccel', choices=['nvenc', 'none'], default='none', help='Hardware acceleration method.')
+    parser.add_argument('--keep-original-video', action='store_true', help='Keep the original video stream in the output MKV.')
 
     args = parser.parse_args()
 
@@ -69,7 +71,8 @@ def main():
                 print(f"Error parsing subtitle file {subtitle_file}: {e}")
                 continue
             # Create a list of timestamps
-            timestamps = [caption.start_in_seconds for caption in captions]
+            timestamps = [0]  # Always start from the beginning
+            timestamps.extend([caption.start_in_seconds for caption in captions])
             timestamps.append(video_duration)
 
             # Create a list of frames to extract
@@ -124,14 +127,17 @@ def main():
                     'ffmpeg',
                     '-hwaccel', 'auto',
                     '-i', processed_video,
-                    '-c:v', 'h264_nvenc',  # Use hardware acceleration if available
-                    '-preset', 'p4',
-                    # '-c', 'libx264',
+                ]
+                if args.hwaccel == 'nvenc':
+                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
+                else:
+                    command.extend(['-c:v', 'libx264'])
+                command.extend([
                     '-r', '24',
                     '-pix_fmt', 'yuv420p',
                     video_only_file,
                     '-y'
-                ]
+                ])
                 if not args.verbose:
                     command.extend(['-loglevel', 'quiet'])
                 subprocess.run(command, check=True)
@@ -143,14 +149,17 @@ def main():
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', concat_list_file,
-                    '-c:v', 'h264_nvenc',  # Use hardware acceleration if available
-                    '-preset', 'p4',
-                    # '-c', 'libx264',
+                ]
+                if args.hwaccel == 'nvenc':
+                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
+                else:
+                    command.extend(['-c:v', 'libx264'])
+                command.extend([
                     '-r', '24',
                     '-pix_fmt', 'yuv420p',
                     video_only_file,
                     '-y'
-                ]
+                ])
                 if not args.verbose:
                     command.extend(['-loglevel', 'quiet'])
                 subprocess.run(command, check=True)
@@ -166,15 +175,24 @@ def main():
                 command.extend(['-i', f])
             command.extend(['-i', args.input_file])
 
+            video_maps = 0
+            if args.keep_original_video:
+                command.extend(['-map', f'{len(slideshow_files)}:v'])
+                video_maps += 1
+
             for i in range(len(slideshow_files)):
                 command.extend(['-map', f'{i}:v'])
-            command.extend(['-map', f'{len(slideshow_files)}:a'])
+                video_maps += 1
+            command.extend(['-map', f'{len(slideshow_files)}:a?']) # Optional audio
+            command.extend(['-map', f'{len(slideshow_files)}:s?']) # Optional subtitles
 
             for i, stream in enumerate(subtitle_streams):
                 lang = stream.get('tags', {}).get('language', 'und')
-                command.extend([f'-metadata:s:v:{i}', f"language={lang}"])
+                command.extend([f'-metadata:s:v:{i+video_maps-1}', f"language={lang}"])
             command.extend([
-                '-c', 'copy',
+                '-c:v', 'copy',
+                '-c:a', 'copy',
+                '-c:s', 'copy',
                 args.output_file,
                 '-y'
             ])
