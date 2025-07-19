@@ -120,13 +120,37 @@ def main():
                 for i in range(1, len(video_parts)):
                     processed_video = ffmpeg.filter([processed_video, video_parts[i]], 'xfade', transition='fade', duration=fade_duration, offset=sum(f['duration'] for f in frames_to_extract[:i]) - fade_duration)
 
-                command = ['ffmpeg', '-i', processed_video, '-c', 'libx264', '-r', '24', '-pix_fmt', 'yuv420p', video_only_file, '-y']
+                command = [
+                    'ffmpeg',
+                    '-hwaccel', 'auto',
+                    '-i', processed_video,
+                    '-c:v', 'h264_nvenc',  # Use hardware acceleration if available
+                    '-preset', 'p4',
+                    # '-c', 'libx264',
+                    '-r', '24',
+                    '-pix_fmt', 'yuv420p',
+                    video_only_file,
+                    '-y'
+                ]
                 if not args.verbose:
                     command.extend(['-loglevel', 'quiet'])
                 subprocess.run(command, check=True)
             else:
                 # Use concat for no transitions
-                command = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list_file, '-c', 'libx264', '-r', '24', '-pix_fmt', 'yuv420p', video_only_file, '-y']
+                command = [
+                    'ffmpeg',
+                    '-hwaccel', 'auto',
+                    '-f', 'concat',
+                    '-safe', '0',
+                    '-i', concat_list_file,
+                    '-c:v', 'h264_nvenc',  # Use hardware acceleration if available
+                    '-preset', 'p4',
+                    # '-c', 'libx264',
+                    '-r', '24',
+                    '-pix_fmt', 'yuv420p',
+                    video_only_file,
+                    '-y'
+                ]
                 if not args.verbose:
                     command.extend(['-loglevel', 'quiet'])
                 subprocess.run(command, check=True)
@@ -135,7 +159,9 @@ def main():
         # Merge slideshows and audio into a single MKV file
         if slideshow_files:
             print("Merging slideshows into a single MKV file...")
-            command = ['ffmpeg']
+            command = [
+                'ffmpeg'
+            ]
             for f in slideshow_files:
                 command.extend(['-i', f])
             command.extend(['-i', args.input_file])
@@ -147,8 +173,11 @@ def main():
             for i, stream in enumerate(subtitle_streams):
                 lang = stream.get('tags', {}).get('language', 'und')
                 command.extend([f'-metadata:s:v:{i}', f"language={lang}"])
-
-            command.extend(['-c', 'copy', args.output_file, '-y'])
+            command.extend([
+                '-c', 'copy',
+                args.output_file,
+                '-y'
+            ])
             if not args.verbose:
                 command.extend(['-loglevel', 'quiet'])
             subprocess.run(command, check=True)
@@ -161,7 +190,16 @@ def main():
 
 
 def extract_frame(input_file, start_time, output_file, verbose):
-    command = ['ffmpeg', '-ss', str(start_time), '-i', input_file, '-vframes', '1', '-q', '2', output_file, '-y']
+    command = [
+        'ffmpeg',
+        '-hwaccel', 'auto',
+        '-ss', str(start_time),
+        '-i', input_file,
+        '-vframes', '1',
+        '-q', '2',
+        output_file,
+        '-y'
+    ]
     if not verbose:
         command.extend(['-loglevel', 'quiet'])
     subprocess.run(command, check=True)
