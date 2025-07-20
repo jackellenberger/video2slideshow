@@ -9,7 +9,8 @@ import subprocess
 
 def main():
     parser = argparse.ArgumentParser(description='Create a video slideshow from a video and its corresponding subtitle file.')
-    parser.add_argument('input_file', help='Path to the input MKV file.')
+    parser.add_argument('input_file', help='Path to the input video file.')
+    parser.add_argument('-s', '--subtitle_file', help='Path to the external subtitle file.')
     parser.add_argument('-o', '--output_file', default='slideshow.mp4', help='Path to the output video file.')
     parser.add_argument('--min_frame_length', type=float, default=0.1, help='Minimum duration for a frame.')
     parser.add_argument('--max_frame_length', type=float, default=10.0, help='Maximum duration for a frame.')
@@ -21,10 +22,6 @@ def main():
     parser.add_argument('--preview', type=float, help='Only process the first N seconds of the video.')
 
     args = parser.parse_args()
-
-    if not args.input_file.lower().endswith('.mkv'):
-        print("Error: Input file must be an MKV file.")
-        return
 
     # Create a temporary directory to store the extracted frames
     tmp_dir = tempfile.mkdtemp()
@@ -38,31 +35,36 @@ def main():
         if args.preview and args.preview < video_duration:
             video_duration = args.preview
 
-        # Find and extract subtitle streams
-        subtitle_streams = [s for s in probe['streams'] if s['codec_type'] == 'subtitle']
-        if not subtitle_streams:
-            print("Error: No subtitle streams found in the input file.")
-            return
-
-        print(f"Found {len(subtitle_streams)} subtitle streams.")
-
         subtitle_files = []
-        for i, stream in enumerate(subtitle_streams):
-            print(f"Extracting subtitle stream {i}...")
-            subtitle_file = os.path.join(tmp_dir, f"subtitle_{i}.vtt")
-            try:
-                command = ['ffmpeg', '-i', args.input_file, '-map', f'0:s:{i}', subtitle_file, '-y']
-                if not args.verbose:
-                    command.extend(['-loglevel', 'quiet'])
-                subprocess.run(command, check=True)
-                subtitle_files.append(subtitle_file)
-            except (ffmpeg.Error, subprocess.CalledProcessError) as e:
-                print(f"Error extracting subtitle stream {i}: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
-                continue
+        subtitle_streams = []
+        if args.subtitle_file:
+            subtitle_files.append(args.subtitle_file)
+            subtitle_streams.append({'tags': {'title': os.path.basename(args.subtitle_file)}})
+        else:
+            # Find and extract subtitle streams
+            subtitle_streams = [s for s in probe['streams'] if s['codec_type'] == 'subtitle']
+            if not subtitle_streams:
+                print("Error: No subtitle streams found in the input file and no external subtitle file provided.")
+                return
 
-        if not subtitle_files:
-            print("Error: Failed to extract any subtitle streams.")
-            return
+            print(f"Found {len(subtitle_streams)} subtitle streams.")
+
+            for i, stream in enumerate(subtitle_streams):
+                print(f"Extracting subtitle stream {i}...")
+                subtitle_file = os.path.join(tmp_dir, f"subtitle_{i}.vtt")
+                try:
+                    command = ['ffmpeg', '-i', args.input_file, '-map', f'0:s:{i}', subtitle_file, '-y']
+                    if not args.verbose:
+                        command.extend(['-loglevel', 'quiet'])
+                    subprocess.run(command, check=True)
+                    subtitle_files.append(subtitle_file)
+                except (ffmpeg.Error, subprocess.CalledProcessError) as e:
+                    print(f"Error extracting subtitle stream {i}: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
+                    continue
+
+            if not subtitle_files:
+                print("Error: Failed to extract any subtitle streams.")
+                return
 
         slideshow_files = []
         for subtitle_index, subtitle_file in enumerate(subtitle_files):
