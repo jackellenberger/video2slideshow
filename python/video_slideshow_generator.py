@@ -4,7 +4,6 @@ import webvtt
 import os
 import tempfile
 import shutil
-from multiprocessing import Pool
 import subprocess
 
 def main():
@@ -101,76 +100,65 @@ def main():
 
                 frames_to_extract.append({'start_time': start_time, 'duration': duration})
 
-            # Extract frames in parallel
-            pool = Pool()
-            frame_paths = pool.starmap(extract_frame, [(args.input_file, frame['start_time'], os.path.join(tmp_dir, f"frame_{subtitle_index}_{i:04d}.png"), args.verbose) for i, frame in enumerate(frames_to_extract)])
-            pool.close()
-            pool.join()
+            video_only_file = os.path.join(tmp_dir, f'video_only_{subtitle_index}.mp4')
 
-            # Create a concat list file
+            # Get frame rate
+            video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+            if not video_stream:
+                print(f"No video stream found in {args.input_file}")
+                continue
+            frame_rate_str = video_stream.get('r_frame_rate', '25/1')
+            num, den = map(int, frame_rate_str.split('/'))
+            frame_rate = num / den
+
+            clips = []
+            for i, frame in enumerate(frames_to_extract):
+                clip_file = os.path.join(tmp_dir, f"clip_{subtitle_index}_{i:04d}.mp4")
+                select_expr = f"select='eq(n,{int(frame['start_time'] * frame_rate)})'"
+                tpad_expr = f"tpad=stop_mode=clone:stop_duration={frame['duration']}"
+                command = [
+                    'ffmpeg',
+                    '-i', args.input_file,
+                    '-vf', f"{select_expr},{tpad_expr}",
+                    '-an',
+                    '-vframes', '1',
+                    clip_file,
+                    '-y'
+                ]
+                if not args.verbose:
+                    command.extend(['-loglevel', 'quiet'])
+
+                try:
+                    subprocess.run(command, check=True)
+                    clips.append(clip_file)
+                except (ffmpeg.Error, subprocess.CalledProcessError) as e:
+                    print(f"Error generating clip for subtitle track {subtitle_index}: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
+                    continue
+
+            # Concatenate the clips
             concat_list_file = os.path.join(tmp_dir, f'concat_list_{subtitle_index}.txt')
             with open(concat_list_file, 'w') as f:
-                for i, frame in enumerate(frames_to_extract):
-                    f.write(f"file 'frame_{subtitle_index}_{i:04d}.png'\n")
-                    f.write(f"duration {frame['duration']}\n")
+                for clip in clips:
+                    f.write(f"file '{clip}'\n")
 
-            # Create the video slideshow
-            video_only_file = os.path.join(tmp_dir, f'video_only_{subtitle_index}.mp4')
-            if args.fade_duration > 0 and len(frame_paths) > 1:
-                # Use xfade filter for transitions
-                fade_duration = args.fade_duration
+            command = [
+                'ffmpeg',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', concat_list_file,
+                '-c', 'copy',
+                video_only_file,
+                '-y'
+            ]
+            if not args.verbose:
+                command.extend(['-loglevel', 'quiet'])
 
-                # Create a list of video parts
-                video_parts = []
-                for i, frame_path in enumerate(frame_paths):
-                    video_parts.append(ffmpeg.input(frame_path).video)
-
-                # Chain the xfade filters
-                processed_video = video_parts[0]
-                for i in range(1, len(video_parts)):
-                    processed_video = ffmpeg.filter([processed_video, video_parts[i]], 'xfade', transition='fade', duration=fade_duration, offset=sum(f['duration'] for f in frames_to_extract[:i]) - fade_duration)
-
-                command = [
-                    'ffmpeg',
-                    '-hwaccel', 'auto',
-                    '-i', processed_video,
-                ]
-                if args.hwaccel == 'nvenc':
-                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
-                else:
-                    command.extend(['-c:v', 'libx264'])
-                command.extend([
-                    '-r', '24',
-                    '-pix_fmt', 'yuv420p',
-                    video_only_file,
-                    '-y'
-                ])
-                if not args.verbose:
-                    command.extend(['-loglevel', 'quiet'])
+            try:
                 subprocess.run(command, check=True)
-            else:
-                # Use concat for no transitions
-                command = [
-                    'ffmpeg',
-                    '-hwaccel', 'auto',
-                    '-f', 'concat',
-                    '-safe', '0',
-                    '-i', concat_list_file,
-                ]
-                if args.hwaccel == 'nvenc':
-                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
-                else:
-                    command.extend(['-c:v', 'libx264'])
-                command.extend([
-                    '-r', '24',
-                    '-pix_fmt', 'yuv420p',
-                    video_only_file,
-                    '-y'
-                ])
-                if not args.verbose:
-                    command.extend(['-loglevel', 'quiet'])
-                subprocess.run(command, check=True)
-            slideshow_files.append(video_only_file)
+                slideshow_files.append(video_only_file)
+            except (ffmpeg.Error, subprocess.CalledProcessError) as e:
+                print(f"Error generating slideshow for subtitle track {subtitle_index}: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
+                continue
 
         # Merge slideshows and audio into a single MKV file
         if slideshow_files:
@@ -193,7 +181,6 @@ def main():
             if args.preview:
                 command.extend(['-t', str(args.preview)])
             command.extend(['-map', f'{len(slideshow_files)}:a?']) # Optional audio
-            command.extend(['-map', f'{len(slideshow_files)}:s?']) # Optional subtitles
 
             video_stream_index = 0
             if args.keep_original_video:
@@ -208,7 +195,6 @@ def main():
             command.extend([
                 '-c:v', 'copy',
                 '-c:a', 'copy',
-                '-c:s', 'copy',
                 args.output_file,
                 '-y'
             ])
@@ -221,23 +207,6 @@ def main():
     finally:
         # Clean up the temporary directory
         shutil.rmtree(tmp_dir)
-
-
-def extract_frame(input_file, start_time, output_file, verbose):
-    command = [
-        'ffmpeg',
-        '-hwaccel', 'auto',
-        '-ss', str(start_time),
-        '-i', input_file,
-        '-vframes', '1',
-        '-q', '2',
-        output_file,
-        '-y'
-    ]
-    if not verbose:
-        command.extend(['-loglevel', 'quiet'])
-    subprocess.run(command, check=True)
-    return output_file
 
 
 if __name__ == '__main__':
