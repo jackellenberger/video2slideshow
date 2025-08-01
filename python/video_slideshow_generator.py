@@ -114,7 +114,8 @@ def main():
             clips = []
             for i, frame in enumerate(frames_to_extract):
                 clip_file = os.path.join(tmp_dir, f"clip_{subtitle_index}_{i:04d}.mp4")
-                select_expr = f"select='eq(n,{int(frame['start_time'] * frame_rate)})'"
+                frame_number = int(frame['start_time'] * frame_rate)
+                select_expr = f"select='between(n,{frame_number-1},{frame_number+1})'"
                 tpad_expr = f"tpad=stop_mode=clone:stop_duration={frame['duration']}"
                 command = [
                     'ffmpeg',
