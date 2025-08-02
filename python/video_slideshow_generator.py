@@ -8,19 +8,27 @@ import subprocess
 import math
 import multiprocessing
 from functools import partial
+from tqdm import tqdm
 
 def run_ffmpeg_command(command, verbose):
-    """Helper function to run a single ffmpeg command for multiprocessing."""
+    """
+    Helper function to run a single ffmpeg command. This is used by the
+    multiprocessing pool.
+    """
     if not verbose:
-        # Hide ffmpeg's output unless verbose is on
         command.extend(['-loglevel', 'error'])
+
+    stdout_dest = subprocess.DEVNULL if not verbose else None
+    stderr_dest = subprocess.DEVNULL if not verbose else None
+    
     try:
-        # Using capture_output to prevent interleaved printing from parallel processes
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, check=True, 
+                       stdin=subprocess.DEVNULL, 
+                       stdout=stdout_dest,
+                       stderr=stderr_dest)
     except subprocess.CalledProcessError as e:
-        # Print errors if a command fails
-        print(f"FFmpeg failed for command: {' '.join(command)}")
-        print(f"FFmpeg stderr:\n{e.stderr.decode('utf-8')}")
+        if not verbose:
+            print(f"\nFFmpeg worker failed for command: {' '.join(command)}")
 
 
 def main():
@@ -38,14 +46,8 @@ def main():
     parser.add_argument('--keep-original-video', action='store_true', help='Keep the original video stream in the output MKV.')
     parser.add_argument('--preview', type=float, help='Only process the first N seconds of the video.')
     parser.add_argument('--image-format', choices=['jpg', 'png'], default='jpg', help='Intermediate image format. JPG is much smaller, PNG is lossless.')
-    # --- NEW: Added argument to control extraction method ---
-    parser.add_argument('--extraction-method', choices=['fast', 'accurate'], default='fast', help='Frame extraction method. "fast" is quicker but less frame-precise. "accurate" is slow but exact.')
-
 
     args = parser.parse_args()
-
-    if args.fade_duration > 0:
-        print("Note: Fade transitions are complex with this approach and are currently disabled.")
 
     # Create a temporary directory
     tmp_dir = tempfile.mkdtemp()
@@ -125,8 +127,6 @@ def main():
                 if duration > 0:
                    frames_to_extract.append({'start_time': current_time, 'duration': duration})
 
-            video_only_file = os.path.join(tmp_dir, f'video_only_{subtitle_index}.mp4')
-
             if not frames_to_extract:
                 print("No frames to extract for this subtitle track.")
                 continue
@@ -135,6 +135,8 @@ def main():
             if video_stream is None:
                 print("Error: No video stream found in the input file.")
                 continue
+            
+            audio_stream_exists = any(s['codec_type'] == 'audio' for s in probe['streams'])
 
             avg_frame_rate = video_stream.get('avg_frame_rate', '24/1')
             if avg_frame_rate == '0/0':
@@ -142,165 +144,161 @@ def main():
             num, den = avg_frame_rate.split('/')
             framerate = float(num) / float(den) if float(den) > 0 else 24
 
-            # --- REVISED IMPLEMENTATION START (Method Selection) ---
-
-            # 1. Identify unique frames needed by their timestamps
+            # --- Frame Extraction (Timed Parallel Batch Method) ---
             unique_timestamps = sorted(list(set([round(f['start_time'], 3) for f in frames_to_extract])))
             if not unique_timestamps:
                 print("No unique timestamps to extract for this track.")
                 continue
 
+            print(f"Preparing to extract {len(unique_timestamps)} unique frames...")
             image_format = args.image_format
             image_quality_param = '2' if image_format == 'jpg' else '1'
             extracted_frame_map = {}
 
-            if args.extraction_method == 'fast':
-                # --- FAST (PARALLEL) METHOD ---
-                print(f"Using fast extraction method for {len(unique_timestamps)} unique frames.")
-                commands_to_run = []
-                for i, ts in enumerate(unique_timestamps):
-                    image_filename = f"frame_{subtitle_index}_{i+1:05d}.{image_format}"
-                    image_path = os.path.join(tmp_dir, image_filename)
-                    extracted_frame_map[ts] = image_filename
-                    
-                    # Command uses input seeking (-ss before -i) for speed
-                    command = ['ffmpeg', '-ss', str(ts), '-i', args.input_file, '-vframes', '1', '-q:v', image_quality_param, image_path, '-y']
-                    commands_to_run.append(command)
-
-                cpu_count = multiprocessing.cpu_count()
-                print(f"Extracting frames in parallel using up to {cpu_count} cores...")
-                
-                # Use a partial function to pass the 'verbose' argument to the worker
-                worker_func = partial(run_ffmpeg_command, verbose=args.verbose)
-                
-                with multiprocessing.Pool(processes=cpu_count) as pool:
-                    pool.map(worker_func, commands_to_run)
-                print("Frame extraction complete.")
-
-            else:
-                # --- ACCURATE (SELECT FILTER) METHOD ---
-                print(f"Using accurate extraction method for {len(unique_timestamps)} unique frames (this may be slow).")
-                frame_numbers = [int(round(ts * framerate)) for ts in unique_timestamps]
-
-                select_filter_str = "select='" + "+".join([f"eq(n,{fn})" for fn in frame_numbers]) + "',setpts=N/FR/TB"
-                filter_script_path = os.path.join(tmp_dir, f"select_script_{subtitle_index}.txt")
-                with open(filter_script_path, 'w') as f:
-                    f.write(select_filter_str)
-
-                image_pattern = os.path.join(tmp_dir, f"frame_{subtitle_index}_%05d.{image_format}")
-
-                command = [
-                    'ffmpeg', '-i', args.input_file,
-                    '-filter_script', filter_script_path,
-                    '-vsync', 'vfr', '-q:v', image_quality_param,
-                    image_pattern, '-y'
-                ]
-                if not args.verbose:
-                    command.extend(['-loglevel', 'quiet'])
-                subprocess.run(command, check=True)
-
-                for i, ts in enumerate(unique_timestamps):
-                    image_filename = f"frame_{subtitle_index}_{i+1:05d}.{image_format}"
-                    extracted_frame_map[ts] = image_filename
-
-            # --- Generate the OUTPUT concat file (for assembling the slideshow) ---
-            print("Generating slideshow instructions...")
-            output_concat_path = os.path.join(tmp_dir, f"output_slideshow_{subtitle_index}.txt")
-            with open(output_concat_path, 'w') as concat_file:
-                concat_file.write("ffconcat version 1.0\n")
-                last_image_path = None
-                
-                for frame in frames_to_extract:
-                    timestamp = round(frame['start_time'], 3)
-                    image_filename = extracted_frame_map.get(timestamp)
-
-                    if image_filename:
-                        image_path = os.path.join(tmp_dir, image_filename)
-                        abs_image_path = os.path.abspath(image_path)
-
-                        if not os.path.exists(abs_image_path):
-                            print(f"Warning: Missing expected frame {abs_image_path} for timestamp {timestamp}. Skipping.")
-                            continue
-
-                        escaped_image_path = abs_image_path.replace("'", r"\'")
-
-                        concat_file.write(f"file '{escaped_image_path}'\n")
-                        concat_file.write(f"duration {frame['duration']:.6f}\n")
-                        last_image_path = escaped_image_path
-
-                if last_image_path:
-                    concat_file.write(f"file '{last_image_path}'\n")
-
-            # --- Combine images into the final video ---
-            print("Rendering slideshow video...")
-            command = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', output_concat_path]
+            BATCH_SIZE = 50
+            timestamp_batches = [unique_timestamps[i:i + BATCH_SIZE] for i in range(0, len(unique_timestamps), BATCH_SIZE)]
             
+            commands_to_run = []
+            for i, batch_timestamps in enumerate(timestamp_batches):
+                start_time = batch_timestamps[0]
+                # --- MODIFIED: Calculate a duration to prevent reading too far ---
+                end_time = batch_timestamps[-1]
+                duration = end_time - start_time + 1.0 # Add a 1-second buffer
+
+                relative_frame_numbers = sorted(list(set([max(0, int(round((ts - start_time) * framerate))) for ts in batch_timestamps])))
+                select_filter_str = "select='" + "+".join([f"eq(n,{fn})" for fn in relative_frame_numbers]) + "'"
+                output_pattern = os.path.join(tmp_dir, f"batch_{i}_frame_%05d.{image_format}")
+                
+                # --- MODIFIED: Add -t duration flag to the command ---
+                command = ['ffmpeg', '-nostdin', '-ss', str(start_time), '-t', str(duration), '-i', args.input_file,
+                           '-vf', select_filter_str, '-vsync', 'vfr', '-q:v', image_quality_param,
+                           output_pattern, '-y']
+                commands_to_run.append(command)
+
+            cpu_count = multiprocessing.cpu_count()
+            pool_size = max(1, cpu_count // 2)
+            worker_func = partial(run_ffmpeg_command, verbose=args.verbose)
+            
+            print(f"Extracting frames in {len(commands_to_run)} batches using a pool of {pool_size} workers...")
+            with multiprocessing.Pool(processes=pool_size) as pool:
+                for _ in tqdm(pool.imap_unordered(worker_func, commands_to_run), total=len(commands_to_run), desc="Extracting Frames"):
+                    pass
+            print("Frame extraction complete.")
+
+            # --- Map extracted images back to their timestamps ---
+            for i, batch_timestamps in enumerate(timestamp_batches):
+                start_time = batch_timestamps[0]
+                relative_frame_numbers = sorted(list(set([max(0, int(round((ts - start_time) * framerate))) for ts in batch_timestamps])))
+                
+                for j, rel_fn in enumerate(relative_frame_numbers):
+                    corresponding_timestamps = [ts for ts in batch_timestamps if max(0, int(round((ts - start_time) * framerate))) == rel_fn]
+                    image_filename = f"batch_{i}_frame_{j+1:05d}.{image_format}"
+                    image_path = os.path.join(tmp_dir, image_filename)
+                    
+                    if os.path.exists(image_path):
+                        for ts in corresponding_timestamps:
+                            extracted_frame_map[ts] = image_path
+                    else:
+                        print(f"Warning: Expected image {image_path} not found. It might have been skipped by ffmpeg.")
+
+            # --- Video and Audio Assembly in a Single Step ---
+            print("Rendering slideshow video with audio...")
+            
+            slideshow_with_audio_file = os.path.join(tmp_dir, f'slideshow_audio_{subtitle_index}.mkv')
+
+            inputs = []
+            filter_chains = []
+            concat_streams = []
+            
+            image_sequence = []
+            for frame in frames_to_extract:
+                timestamp = round(frame['start_time'], 3)
+                image_path = extracted_frame_map.get(timestamp)
+                if image_path and os.path.exists(image_path):
+                    image_sequence.append({'path': image_path, 'duration': frame['duration']})
+
+            if not image_sequence:
+                print("No images found to create slideshow. Skipping track.")
+                continue
+
+            inputs.extend(['-i', args.input_file])
+            audio_input_index = 0
+
+            for i, image_info in enumerate(image_sequence):
+                inputs.extend(['-loop', '1', '-t', str(image_info['duration']), '-i', image_info['path']])
+                stream_label = f"v{i}"
+                
+                if args.fade_duration > 0:
+                    fade_duration = min(args.fade_duration, image_info['duration'] / 2)
+                    fade_out_start = image_info['duration'] - fade_duration
+                    fade_filter = f"fade=t=in:st=0:d={fade_duration},fade=t=out:st={fade_out_start}:d={fade_duration}"
+                    filter_chains.append(f"[{i+1}:v]{fade_filter}[{stream_label}]")
+                else:
+                    filter_chains.append(f"[{i+1}:v]null[{stream_label}]")
+                concat_streams.append(f"[{stream_label}]")
+
+            filter_complex = ";".join(filter_chains) + ";" + "".join(concat_streams) + f"concat=n={len(image_sequence)}:v=1:a=0[outv]"
+            
+            command = ['ffmpeg'] + inputs + ['-filter_complex', filter_complex]
+            
+            command.extend(['-map', '[outv]'])
+            if audio_stream_exists:
+                command.extend(['-map', f'{audio_input_index}:a:0?'])
+
             if args.hwaccel == 'nvenc':
                 command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
             else:
                 command.extend(['-c:v', 'libx264'])
+            
+            if audio_stream_exists:
+                command.extend(['-c:a', 'aac', '-b:a', '192k'])
 
-            command.extend(['-r', '24', '-pix_fmt', 'yuv420p', video_only_file, '-y'])
+            command.extend(['-r', '24', '-pix_fmt', 'yuv420p', '-shortest', slideshow_with_audio_file, '-y'])
 
             if not args.verbose:
                 command.extend(['-loglevel', 'quiet'])
-
+            
             subprocess.run(command, check=True)
-            slideshow_files.append(video_only_file)
+            slideshow_files.append(slideshow_with_audio_file)
 
-        # --- Merge slideshows and audio ---
+        # --- Final Muxing (if necessary) ---
         if slideshow_files:
-            print("Merging slideshows, audio, and subtitles into a single MKV file...")
-            command = ['ffmpeg']
+            if len(slideshow_files) == 1 and not args.keep_original_video:
+                print(f"Finalizing output file...")
+                shutil.move(slideshow_files[0], args.output_file)
+            else:
+                print("Muxing final slideshows and streams into a single MKV file...")
+                command = ['ffmpeg']
+                
+                for f in slideshow_files:
+                    command.extend(['-i', f])
+                
+                if args.keep_original_video:
+                    command.extend(['-i', args.input_file])
 
-            valid_slideshows = [f for f in slideshow_files if f]
-            if not valid_slideshows:
-                print("No valid slideshows were generated.")
-                return
+                for i in range(len(slideshow_files)):
+                    command.extend(['-map', f'{i}:v', '-map', f'{i}:a?'])
 
-            for f in valid_slideshows:
-                command.extend(['-i', f])
-            command.extend(['-i', args.input_file])
+                if args.keep_original_video:
+                    original_video_input_index = len(slideshow_files)
+                    command.extend(['-map', f'{original_video_input_index}:v', '-map', f'{original_video_input_index}:s?'])
 
-            # Map video streams
-            video_maps = 0
-            if args.keep_original_video:
-                command.extend(['-map', f'{len(valid_slideshows)}:v'])
-                video_maps += 1
-
-            for i in range(len(valid_slideshows)):
-                command.extend(['-map', f'{i}:v'])
-                video_maps += 1
-            
-            if args.preview:
-                command.extend(['-t', str(args.preview)])
-
-            # Map audio and subtitle streams
-            command.extend(['-map', f'{len(valid_slideshows)}:a?'])
-            command.extend(['-map', f'{len(valid_slideshows)}:s?'])
-
-            # Set metadata for video streams
-            video_stream_index = 0
-            if args.keep_original_video:
-                command.extend(['-metadata:s:v:0', 'title=Original Video'])
-                video_stream_index += 1
-            
-            valid_stream_metadata = []
-            for i in range(len(subtitle_streams)):
-                if os.path.join(tmp_dir, f'video_only_{i}.mp4') in valid_slideshows:
-                    valid_stream_metadata.append(subtitle_streams[i])
-
-            for i, stream in enumerate(valid_stream_metadata):
-                lang = stream.get('tags', {}).get('language', 'und')
-                title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {i}')
-                command.extend([f'-metadata:s:v:{video_stream_index}', f"language={lang}", f'-metadata:s:v:{video_stream_index}', f"title={title}"])
-                video_stream_index += 1
-            
-            # Final output command
-            command.extend(['-c:v', 'copy', '-c:a', 'copy', '-c:s', 'copy', args.output_file, '-y'])
-            if not args.verbose:
-                command.extend(['-loglevel', 'quiet'])
-            subprocess.run(command, check=True)
+                video_stream_index = 0
+                for i, stream in enumerate(subtitle_streams):
+                    lang = stream.get('tags', {}).get('language', 'und')
+                    title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {i}')
+                    command.extend([f'-metadata:s:v:{video_stream_index}', f"language={lang}", f'-metadata:s:v:{video_stream_index}', f"title={title}"])
+                    video_stream_index += 1
+                
+                if args.keep_original_video:
+                    command.extend([f'-metadata:s:v:{video_stream_index}', 'title=Original Video'])
+                
+                command.extend(['-c', 'copy', args.output_file, '-y'])
+                
+                if not args.verbose:
+                    command.extend(['-loglevel', 'quiet'])
+                
+                subprocess.run(command, check=True)
 
             print(f"Slideshow created successfully: {args.output_file}")
 
