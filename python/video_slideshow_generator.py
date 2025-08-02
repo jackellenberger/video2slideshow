@@ -4,7 +4,6 @@ import webvtt
 import os
 import tempfile
 import shutil
-from multiprocessing import Pool
 import subprocess
 
 def main():
@@ -101,99 +100,98 @@ def main():
 
                 frames_to_extract.append({'start_time': start_time, 'duration': duration})
 
-            # Extract frames in parallel
-            pool = Pool()
-            frame_paths = pool.starmap(extract_frame, [(args.input_file, frame['start_time'], os.path.join(tmp_dir, f"frame_{subtitle_index}_{i:04d}.png"), args.verbose) for i, frame in enumerate(frames_to_extract)])
-            pool.close()
-            pool.join()
-
-            # Create a concat list file
-            concat_list_file = os.path.join(tmp_dir, f'concat_list_{subtitle_index}.txt')
-            with open(concat_list_file, 'w') as f:
-                for i, frame in enumerate(frames_to_extract):
-                    f.write(f"file 'frame_{subtitle_index}_{i:04d}.png'\n")
-                    f.write(f"duration {frame['duration']}\n")
-
-            # Create the video slideshow
             video_only_file = os.path.join(tmp_dir, f'video_only_{subtitle_index}.mp4')
-            if args.fade_duration > 0 and len(frame_paths) > 1:
-                # Use xfade filter for transitions
-                fade_duration = args.fade_duration
 
-                # Create a list of video parts
-                video_parts = []
-                for i, frame_path in enumerate(frame_paths):
-                    video_parts.append(ffmpeg.input(frame_path).video)
+            if not frames_to_extract:
+                print(f"No frames to extract for subtitle track {subtitle_index}.")
+                continue
 
-                # Chain the xfade filters
-                processed_video = video_parts[0]
-                for i in range(1, len(video_parts)):
-                    processed_video = ffmpeg.filter([processed_video, video_parts[i]], 'xfade', transition='fade', duration=fade_duration, offset=sum(f['duration'] for f in frames_to_extract[:i]) - fade_duration)
+            # Get video frame rate
+            probe = ffmpeg.probe(args.input_file)
+            video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
+            if video_stream is None:
+                print(f"Could not find video stream in {args.input_file}")
+                continue
 
-                command = [
-                    'ffmpeg',
-                    '-hwaccel', 'auto',
-                    '-i', processed_video,
-                ]
-                if args.hwaccel == 'nvenc':
-                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
-                else:
-                    command.extend(['-c:v', 'libx264'])
-                command.extend([
-                    '-r', '24',
-                    '-pix_fmt', 'yuv420p',
-                    video_only_file,
-                    '-y'
-                ])
-                if not args.verbose:
-                    command.extend(['-loglevel', 'quiet'])
-                subprocess.run(command, check=True)
+            avg_frame_rate = video_stream.get('avg_frame_rate', '24/1')
+            if avg_frame_rate == '0/0':
+                avg_frame_rate = '24/1'
+            num, den = avg_frame_rate.split('/')
+            framerate = float(num) / float(den) if float(den) > 0 else 24
+
+            # Build select filter expression
+            select_expr_parts = [f"eq(n,{int(f['start_time'] * framerate)})" for f in frames_to_extract]
+            select_expr = "+".join(select_expr_parts)
+
+            # Build setpts filter expression
+            durations = [f['duration'] for f in frames_to_extract]
+            cumulative_durations = [0.0]
+            current_duration = 0.0
+            for d in durations[:-1]:
+                current_duration += d
+                cumulative_durations.append(current_duration)
+
+            setpts_expr = "NAN"
+            for i in range(len(cumulative_durations) - 1, -1, -1):
+                setpts_expr = f"if(eq(N,{i}),{cumulative_durations[i]},{setpts_expr})"
+
+            setpts_expr = f"({setpts_expr})/TB"
+
+            # Create the video slideshow using a single ffmpeg command
+            command = ['ffmpeg', '-i', args.input_file]
+
+            # Fade in/out functionality (currently disabled as per user request)
+            # if args.fade_duration > 0 and len(frames_to_extract) > 1:
+            #     fade_expr_parts = []
+            #     for i in range(len(frames_to_extract) - 1):
+            #         offset = cumulative_durations[i+1] - args.fade_duration
+            #         fade_expr_parts.append(f"fade=t=in:st={offset}:d={args.fade_duration}")
+            #     fade_expr = ",".join(fade_expr_parts)
+            #     command.extend(['-vf', f"select='{select_expr}',setpts='{setpts_expr}',{fade_expr}"])
+            # else:
+            #     command.extend(['-vf', f"select='{select_expr}',setpts='{setpts_expr}'"])
+
+            command.extend(['-vf', f"select='{select_expr}',setpts='{setpts_expr}'"])
+
+            if args.hwaccel == 'nvenc':
+                command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
             else:
-                # Use concat for no transitions
-                command = [
-                    'ffmpeg',
-                    '-hwaccel', 'auto',
-                    '-f', 'concat',
-                    '-safe', '0',
-                    '-i', concat_list_file,
-                ]
-                if args.hwaccel == 'nvenc':
-                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
-                else:
-                    command.extend(['-c:v', 'libx264'])
-                command.extend([
-                    '-r', '24',
-                    '-pix_fmt', 'yuv420p',
-                    video_only_file,
-                    '-y'
-                ])
-                if not args.verbose:
-                    command.extend(['-loglevel', 'quiet'])
-                subprocess.run(command, check=True)
+                command.extend(['-c:v', 'libx264'])
+
+            command.extend(['-r', '24', '-pix_fmt', 'yuv420p', video_only_file, '-y'])
+
+            if not args.verbose:
+                command.extend(['-loglevel', 'quiet'])
+
+            subprocess.run(command, check=True)
             slideshow_files.append(video_only_file)
 
         # Merge slideshows and audio into a single MKV file
         if slideshow_files:
             print("Merging slideshows into a single MKV file...")
-            command = [
-                'ffmpeg'
-            ]
-            for f in slideshow_files:
+            command = ['ffmpeg']
+
+            valid_slideshows = [f for f in slideshow_files if f]
+            if not valid_slideshows:
+                print("No valid slideshows were generated.")
+                return
+
+            for f in valid_slideshows:
                 command.extend(['-i', f])
             command.extend(['-i', args.input_file])
 
             video_maps = 0
             if args.keep_original_video:
-                command.extend(['-map', f'{len(slideshow_files)}:v'])
+                command.extend(['-map', f'{len(valid_slideshows)}:v'])
                 video_maps += 1
 
-            for i in range(len(slideshow_files)):
+            for i in range(len(valid_slideshows)):
                 command.extend(['-map', f'{i}:v'])
                 video_maps += 1
             if args.preview:
                 command.extend(['-t', str(args.preview)])
-            command.extend(['-map', f'{len(slideshow_files)}:a?']) # Optional audio
-            command.extend(['-map', f'{len(slideshow_files)}:s?']) # Optional subtitles
+            command.extend(['-map', f'{len(valid_slideshows)}:a?']) # Optional audio
+            command.extend(['-map', f'{len(valid_slideshows)}:s?']) # Optional subtitles
 
             video_stream_index = 0
             if args.keep_original_video:
@@ -221,24 +219,6 @@ def main():
     finally:
         # Clean up the temporary directory
         shutil.rmtree(tmp_dir)
-
-
-def extract_frame(input_file, start_time, output_file, verbose):
-    command = [
-        'ffmpeg',
-        '-hwaccel', 'auto',
-        '-ss', str(start_time),
-        '-i', input_file,
-        '-vframes', '1',
-        '-q', '2',
-        output_file,
-        '-y'
-    ]
-    if not verbose:
-        command.extend(['-loglevel', 'quiet'])
-    subprocess.run(command, check=True)
-    return output_file
-
 
 if __name__ == '__main__':
     main()
