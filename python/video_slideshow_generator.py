@@ -21,10 +21,28 @@ def main():
     parser.add_argument('--keep-original-video', action='store_true', help='Keep the original video stream in the output MKV.')
     parser.add_argument('--preview', type=float, help='Only process the first N seconds of the video.')
     parser.add_argument('--subtitle_track', type=int, action='append', help='Select specific subtitle tracks to generate slideshows for (0-based index). Can be used multiple times.')
+    parser.add_argument('--list-subtitles', action='store_true', help='List available subtitle tracks and exit.')
 
     args = parser.parse_args()
 
     # Create a temporary directory to store the extracted frames
+    if args.list_subtitles:
+        try:
+             probe = ffmpeg.probe(args.input_file)
+             subtitle_streams = [s for s in probe['streams'] if s['codec_type'] == 'subtitle']
+             if not subtitle_streams:
+                 print("No subtitle streams found.")
+             else:
+                 print("Available subtitle tracks:")
+                 for i, stream in enumerate(subtitle_streams):
+                     tags = stream.get('tags', {})
+                     lang = tags.get('language', 'unknown')
+                     title = tags.get('title', 'N/A')
+                     print(f"Index {i}: Language: {lang}, Title: {title}")
+        except ffmpeg.Error as e:
+            print(f"Error probing file: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
+        return
+
     tmp_dir = tempfile.mkdtemp()
     print(f"Temporary directory: {tmp_dir}")
 
