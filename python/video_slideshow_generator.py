@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--hwaccel', choices=['nvenc', 'none'], default='none', help='Hardware acceleration method.')
     parser.add_argument('--keep-original-video', action='store_true', help='Keep the original video stream in the output MKV.')
     parser.add_argument('--preview', type=float, help='Only process the first N seconds of the video.')
+    parser.add_argument('--subtitle_track', type=int, action='append', help='Select specific subtitle tracks to generate slideshows for (0-based index). Can be used multiple times.')
 
     args = parser.parse_args()
 
@@ -37,9 +38,11 @@ def main():
 
         subtitle_files = []
         subtitle_streams = []
+        used_subtitle_streams = []
         if args.subtitle_file:
             subtitle_files.append(args.subtitle_file)
             subtitle_streams.append({'tags': {'title': os.path.basename(args.subtitle_file)}})
+            used_subtitle_streams.append({'stream': subtitle_streams[0], 'index': 0})
         else:
             # Find and extract subtitle streams
             subtitle_streams = [s for s in probe['streams'] if s['codec_type'] == 'subtitle']
@@ -50,6 +53,9 @@ def main():
             print(f"Found {len(subtitle_streams)} subtitle streams.")
 
             for i, stream in enumerate(subtitle_streams):
+                if args.subtitle_track and i not in args.subtitle_track:
+                    continue
+
                 print(f"Extracting subtitle stream {i}...")
                 subtitle_file = os.path.join(tmp_dir, f"subtitle_{i}.vtt")
                 try:
@@ -58,6 +64,7 @@ def main():
                         command.extend(['-loglevel', 'quiet'])
                     subprocess.run(command, check=True)
                     subtitle_files.append(subtitle_file)
+                    used_subtitle_streams.append({'stream': stream, 'index': i})
                 except (ffmpeg.Error, subprocess.CalledProcessError) as e:
                     print(f"Error extracting subtitle stream {i}: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
                     continue
@@ -200,15 +207,23 @@ def main():
                 command.extend(['-metadata:s:v:0', 'title=Original Video'])
                 video_stream_index += 1
 
-            for i, stream in enumerate(subtitle_streams):
+            for item in used_subtitle_streams:
+                stream = item['stream']
+                original_index = item['index']
                 lang = stream.get('tags', {}).get('language', 'und')
-                title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {i}')
+                title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {original_index}')
                 command.extend([f'-metadata:s:v:{video_stream_index}', f"language={lang}", f'-metadata:s:v:{video_stream_index}', f"title={title}"])
                 video_stream_index += 1
+
+            command.extend(['-c:v', 'copy', '-c:a', 'copy'])
+
+            # Determine subtitle codec based on output file extension
+            if args.output_file.lower().endswith('.mp4'):
+                 command.extend(['-c:s', 'mov_text'])
+            else:
+                 command.extend(['-c:s', 'copy'])
+
             command.extend([
-                '-c:v', 'copy',
-                '-c:a', 'copy',
-                '-c:s', 'copy',
                 args.output_file,
                 '-y'
             ])
