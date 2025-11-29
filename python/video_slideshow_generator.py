@@ -226,18 +226,36 @@ def main():
                 for f in slideshow_files:
                     command.extend(['-i', f])
 
-                # Always add original file as input to get subtitles
-                command.extend(['-i', args.input_file])
-                input_file_index = len(slideshow_files)
+                # Always add original file as input to get subtitles (if keeping original video)
+                if args.keep_original_video:
+                    command.extend(['-i', args.input_file])
+                    input_file_index = len(slideshow_files)
 
+                # Add extracted subtitle files as inputs
+                # subtitle_files matches the order of used_subtitle_streams
+                for sub_file in subtitle_files:
+                    command.extend(['-i', sub_file])
+
+                # Input indices:
+                # 0..len(slideshow)-1: Slideshows
+                # len(slideshow): Original Video (if kept)
+                # Then subtitles...
+
+                current_input_index = len(slideshow_files)
+                if args.keep_original_video:
+                    current_input_index += 1
+
+                # Map slideshows
                 for i in range(len(slideshow_files)):
                     command.extend(['-map', f'{i}:v', '-map', f'{i}:a?'])
 
                 if args.keep_original_video:
-                    command.extend(['-map', f'{input_file_index}:v'])
+                    command.extend(['-map', f'{len(slideshow_files)}:v']) # Map original video
 
-                # Map subtitles from the original file
-                command.extend(['-map', f'{input_file_index}:s?'])
+                # Map subtitles from the separate inputs
+                for i in range(len(used_subtitle_streams)):
+                    # The subtitle inputs start at current_input_index
+                    command.extend(['-map', f'{current_input_index + i}:s'])
 
                 video_stream_index = 0
                 for item in used_subtitle_streams:
@@ -254,9 +272,9 @@ def main():
                 # Re-encode video and audio to ensure robust keyframe structure and timestamps,
                 # fixing scrubbing (frozen video) and sync issues.
                 if args.hwaccel == 'nvenc':
-                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-g', '30'])
+                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-g', '12'])
                 else:
-                    command.extend(['-c:v', 'libx264', '-g', '30'])
+                    command.extend(['-c:v', 'libx264', '-g', '12'])
 
                 command.extend(['-c:a', 'aac'])
 
