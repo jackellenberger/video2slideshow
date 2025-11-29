@@ -92,8 +92,9 @@ def main():
                 return
 
         slideshow_files = []
-        for subtitle_index, subtitle_file in enumerate(subtitle_files):
-            print(f"Generating slideshow for subtitle track {subtitle_index}...")
+        for loop_index, subtitle_file in enumerate(subtitle_files):
+            original_index = used_subtitle_streams[loop_index]['index']
+            print(f"Generating slideshow for subtitle track {original_index}...")
             # Parse the subtitle file
             try:
                 captions = webvtt.read(subtitle_file)
@@ -128,19 +129,19 @@ def main():
 
             # Extract frames in parallel
             pool = Pool()
-            frame_paths = pool.starmap(extract_frame, [(args.input_file, frame['start_time'], os.path.join(tmp_dir, f"frame_{subtitle_index}_{i:04d}.png"), args.verbose) for i, frame in enumerate(frames_to_extract)])
+            frame_paths = pool.starmap(extract_frame, [(args.input_file, frame['start_time'], os.path.join(tmp_dir, f"frame_{original_index}_{i:04d}.png"), args.verbose) for i, frame in enumerate(frames_to_extract)])
             pool.close()
             pool.join()
 
             # Create a concat list file
-            concat_list_file = os.path.join(tmp_dir, f'concat_list_{subtitle_index}.txt')
+            concat_list_file = os.path.join(tmp_dir, f'concat_list_{original_index}.txt')
             with open(concat_list_file, 'w') as f:
                 for i, frame in enumerate(frames_to_extract):
-                    f.write(f"file 'frame_{subtitle_index}_{i:04d}.png'\n")
+                    f.write(f"file 'frame_{original_index}_{i:04d}.png'\n")
                     f.write(f"duration {frame['duration']}\n")
 
             # Create the video slideshow
-            video_only_file = os.path.join(tmp_dir, f'video_only_{subtitle_index}.mp4')
+            video_only_file = os.path.join(tmp_dir, f'video_only_{original_index}.mp4')
             if args.fade_duration > 0 and len(frame_paths) > 1:
                 # Use xfade filter for transitions
                 fade_duration = args.fade_duration
@@ -155,15 +156,22 @@ def main():
                 for i in range(1, len(video_parts)):
                     processed_video = ffmpeg.filter([processed_video, video_parts[i]], 'xfade', transition='fade', duration=fade_duration, offset=sum(f['duration'] for f in frames_to_extract[:i]) - fade_duration)
 
+                # Audio input
+                audio_input = ffmpeg.input(args.input_file).audio
+
                 command = [
                     'ffmpeg',
                     '-hwaccel', 'auto',
                     '-i', processed_video,
+                    '-i', args.input_file, # Add original file for audio
+                    '-map', '0:v',
+                    '-map', '1:a?',
+                    '-c:a', 'copy'
                 ]
                 if args.hwaccel == 'nvenc':
-                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
+                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-g', '24'])
                 else:
-                    command.extend(['-c:v', 'libx264'])
+                    command.extend(['-c:v', 'libx264', '-g', '24'])
                 command.extend([
                     '-r', '24',
                     '-pix_fmt', 'yuv420p',
@@ -181,11 +189,15 @@ def main():
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', concat_list_file,
+                    '-i', args.input_file, # Add original file for audio
+                    '-map', '0:v',
+                    '-map', '1:a?',
+                    '-c:a', 'copy'
                 ]
                 if args.hwaccel == 'nvenc':
-                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
+                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-g', '24'])
                 else:
-                    command.extend(['-c:v', 'libx264'])
+                    command.extend(['-c:v', 'libx264', '-g', '24'])
                 command.extend([
                     '-r', '24',
                     '-pix_fmt', 'yuv420p',
@@ -199,55 +211,69 @@ def main():
 
         # Merge slideshows and audio into a single MKV file
         if slideshow_files:
-            print("Merging slideshows into a single MKV file...")
-            command = [
-                'ffmpeg'
-            ]
-            for f in slideshow_files:
-                command.extend(['-i', f])
-            command.extend(['-i', args.input_file])
+            # Check if we can just move the file (only if 1 slideshow, no original video, and no subtitles to carry over)
+            # However, we typically want to carry over subtitles from the original file.
+            # So we only use the optimization if there are NO subtitle streams in the original file.
+            can_optimize = len(slideshow_files) == 1 and not args.keep_original_video and not subtitle_streams
 
-            video_maps = 0
-            if args.keep_original_video:
-                command.extend(['-map', f'{len(slideshow_files)}:v'])
-                video_maps += 1
-
-            for i in range(len(slideshow_files)):
-                command.extend(['-map', f'{i}:v'])
-                video_maps += 1
-            if args.preview:
-                command.extend(['-t', str(args.preview)])
-            command.extend(['-map', f'{len(slideshow_files)}:a?']) # Optional audio
-            command.extend(['-map', f'{len(slideshow_files)}:s?']) # Optional subtitles
-
-            video_stream_index = 0
-            if args.keep_original_video:
-                command.extend(['-metadata:s:v:0', 'title=Original Video'])
-                video_stream_index += 1
-
-            for item in used_subtitle_streams:
-                stream = item['stream']
-                original_index = item['index']
-                lang = stream.get('tags', {}).get('language', 'und')
-                title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {original_index}')
-                command.extend([f'-metadata:s:v:{video_stream_index}', f"language={lang}", f'-metadata:s:v:{video_stream_index}', f"title={title}"])
-                video_stream_index += 1
-
-            command.extend(['-c:v', 'copy', '-c:a', 'copy'])
-
-            # Determine subtitle codec based on output file extension
-            if args.output_file.lower().endswith('.mp4'):
-                 command.extend(['-c:s', 'mov_text'])
+            if can_optimize:
+                print(f"Finalizing output file...")
+                shutil.move(slideshow_files[0], args.output_file)
             else:
-                 command.extend(['-c:s', 'copy'])
+                print("Muxing final slideshows and streams into a single MKV file...")
+                command = ['ffmpeg']
 
-            command.extend([
-                args.output_file,
-                '-y'
-            ])
-            if not args.verbose:
-                command.extend(['-loglevel', 'quiet'])
-            subprocess.run(command, check=True)
+                for f in slideshow_files:
+                    command.extend(['-i', f])
+
+                # Always add original file as input to get subtitles
+                command.extend(['-i', args.input_file])
+                input_file_index = len(slideshow_files)
+
+                for i in range(len(slideshow_files)):
+                    command.extend(['-map', f'{i}:v', '-map', f'{i}:a?'])
+
+                if args.keep_original_video:
+                    command.extend(['-map', f'{input_file_index}:v'])
+
+                # Map subtitles from the original file
+                command.extend(['-map', f'{input_file_index}:s?'])
+
+                video_stream_index = 0
+                for item in used_subtitle_streams:
+                    stream = item['stream']
+                    original_index = item['index']
+                    lang = stream.get('tags', {}).get('language', 'und')
+                    title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {original_index}')
+                    command.extend([f'-metadata:s:v:{video_stream_index}', f"language={lang}", f'-metadata:s:v:{video_stream_index}', f"title={title}"])
+                    video_stream_index += 1
+
+                if args.keep_original_video:
+                    command.extend([f'-metadata:s:v:{video_stream_index}', 'title=Original Video'])
+
+                # Re-encode video and audio to ensure robust keyframe structure and timestamps,
+                # fixing scrubbing (frozen video) and sync issues.
+                if args.hwaccel == 'nvenc':
+                    command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-g', '30'])
+                else:
+                    command.extend(['-c:v', 'libx264', '-g', '30'])
+
+                command.extend(['-c:a', 'aac'])
+
+                # Handle subtitles: convert to srt/mov_text to ensure timestamps are rewritten correctly
+                if args.output_file.lower().endswith('.mp4'):
+                     command.extend(['-c:s', 'mov_text'])
+                elif args.output_file.lower().endswith('.mkv'):
+                     command.extend(['-c:s', 'srt'])
+                else:
+                     command.extend(['-c:s', 'copy'])
+
+                command.extend([args.output_file, '-y'])
+
+                if not args.verbose:
+                    command.extend(['-loglevel', 'quiet'])
+
+                subprocess.run(command, check=True)
 
         print(f"Slideshow created successfully: {args.output_file}")
 
