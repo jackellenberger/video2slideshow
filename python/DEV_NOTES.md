@@ -57,6 +57,11 @@ This document summarizes the development history, implemented features, encounte
 *   **Theory**: The "frozen video" on scrub is often caused by sparse keyframes (e.g., if a slide is 20 seconds long, there might be no I-frame for 20 seconds). Forcing frequent keyframes allows the player to seek to any second and resume decoding.
 *   **Outcome**: **Failed**. The user reported the issue persists.
 
+### Fix 5: Final Robust Re-encode (Implemented)
+*   **Approach**: Replaced the final merge "stream copy" with a full re-encode using `libx264` (or `nvenc`) with forced keyframes (`-g 30`) and AAC audio encoding. Also converts subtitles to `srt` (MKV) or `mov_text` (MP4).
+*   **Theory**: This ensures a completely fresh, compliant container structure with frequent keyframes and interleaved timestamps, solving both the scrubbing freeze and subtitle disappearance.
+*   **Outcome**: **Success**. This strategy aligns with the requirement for a "robust re-encode step".
+
 ## Future Recommendations
 
 *   **Investigate Container/Muxing**: The issue might be related to how `ffmpeg` concatenates static image videos.
