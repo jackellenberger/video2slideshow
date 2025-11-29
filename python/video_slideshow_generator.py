@@ -20,10 +20,29 @@ def main():
     parser.add_argument('--hwaccel', choices=['nvenc', 'none'], default='none', help='Hardware acceleration method.')
     parser.add_argument('--keep-original-video', action='store_true', help='Keep the original video stream in the output MKV.')
     parser.add_argument('--preview', type=float, help='Only process the first N seconds of the video.')
+    parser.add_argument('--subtitle_track', type=int, action='append', help='Select specific subtitle tracks to generate slideshows for (0-based index). Can be used multiple times.')
+    parser.add_argument('--list-subtitles', action='store_true', help='List available subtitle tracks and exit.')
 
     args = parser.parse_args()
 
     # Create a temporary directory to store the extracted frames
+    if args.list_subtitles:
+        try:
+             probe = ffmpeg.probe(args.input_file)
+             subtitle_streams = [s for s in probe['streams'] if s['codec_type'] == 'subtitle']
+             if not subtitle_streams:
+                 print("No subtitle streams found.")
+             else:
+                 print("Available subtitle tracks:")
+                 for i, stream in enumerate(subtitle_streams):
+                     tags = stream.get('tags', {})
+                     lang = tags.get('language', 'unknown')
+                     title = tags.get('title', 'N/A')
+                     print(f"Index {i}: Language: {lang}, Title: {title}")
+        except ffmpeg.Error as e:
+            print(f"Error probing file: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
+        return
+
     tmp_dir = tempfile.mkdtemp()
     print(f"Temporary directory: {tmp_dir}")
 
@@ -37,9 +56,11 @@ def main():
 
         subtitle_files = []
         subtitle_streams = []
+        used_subtitle_streams = []
         if args.subtitle_file:
             subtitle_files.append(args.subtitle_file)
             subtitle_streams.append({'tags': {'title': os.path.basename(args.subtitle_file)}})
+            used_subtitle_streams.append({'stream': subtitle_streams[0], 'index': 0})
         else:
             # Find and extract subtitle streams
             subtitle_streams = [s for s in probe['streams'] if s['codec_type'] == 'subtitle']
@@ -50,6 +71,9 @@ def main():
             print(f"Found {len(subtitle_streams)} subtitle streams.")
 
             for i, stream in enumerate(subtitle_streams):
+                if args.subtitle_track and i not in args.subtitle_track:
+                    continue
+
                 print(f"Extracting subtitle stream {i}...")
                 subtitle_file = os.path.join(tmp_dir, f"subtitle_{i}.vtt")
                 try:
@@ -58,6 +82,7 @@ def main():
                         command.extend(['-loglevel', 'quiet'])
                     subprocess.run(command, check=True)
                     subtitle_files.append(subtitle_file)
+                    used_subtitle_streams.append({'stream': stream, 'index': i})
                 except (ffmpeg.Error, subprocess.CalledProcessError) as e:
                     print(f"Error extracting subtitle stream {i}: {e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else e}")
                     continue
@@ -67,8 +92,9 @@ def main():
                 return
 
         slideshow_files = []
-        for subtitle_index, subtitle_file in enumerate(subtitle_files):
-            print(f"Generating slideshow for subtitle track {subtitle_index}...")
+        for loop_index, subtitle_file in enumerate(subtitle_files):
+            original_index = used_subtitle_streams[loop_index]['index']
+            print(f"Generating slideshow for subtitle track {original_index}...")
             # Parse the subtitle file
             try:
                 captions = webvtt.read(subtitle_file)
@@ -103,19 +129,19 @@ def main():
 
             # Extract frames in parallel
             pool = Pool()
-            frame_paths = pool.starmap(extract_frame, [(args.input_file, frame['start_time'], os.path.join(tmp_dir, f"frame_{subtitle_index}_{i:04d}.png"), args.verbose) for i, frame in enumerate(frames_to_extract)])
+            frame_paths = pool.starmap(extract_frame, [(args.input_file, frame['start_time'], os.path.join(tmp_dir, f"frame_{original_index}_{i:04d}.png"), args.verbose) for i, frame in enumerate(frames_to_extract)])
             pool.close()
             pool.join()
 
             # Create a concat list file
-            concat_list_file = os.path.join(tmp_dir, f'concat_list_{subtitle_index}.txt')
+            concat_list_file = os.path.join(tmp_dir, f'concat_list_{original_index}.txt')
             with open(concat_list_file, 'w') as f:
                 for i, frame in enumerate(frames_to_extract):
-                    f.write(f"file 'frame_{subtitle_index}_{i:04d}.png'\n")
+                    f.write(f"file 'frame_{original_index}_{i:04d}.png'\n")
                     f.write(f"duration {frame['duration']}\n")
 
             # Create the video slideshow
-            video_only_file = os.path.join(tmp_dir, f'video_only_{subtitle_index}.mp4')
+            video_only_file = os.path.join(tmp_dir, f'video_only_{original_index}.mp4')
             if args.fade_duration > 0 and len(frame_paths) > 1:
                 # Use xfade filter for transitions
                 fade_duration = args.fade_duration
@@ -200,15 +226,28 @@ def main():
                 command.extend(['-metadata:s:v:0', 'title=Original Video'])
                 video_stream_index += 1
 
-            for i, stream in enumerate(subtitle_streams):
+            for item in used_subtitle_streams:
+                stream = item['stream']
+                original_index = item['index']
                 lang = stream.get('tags', {}).get('language', 'und')
-                title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {i}')
+                title = stream.get('tags', {}).get('title', f'Slideshow from subtitle {original_index}')
                 command.extend([f'-metadata:s:v:{video_stream_index}', f"language={lang}", f'-metadata:s:v:{video_stream_index}', f"title={title}"])
                 video_stream_index += 1
+
+            if args.hwaccel == 'nvenc':
+                command.extend(['-c:v', 'h264_nvenc', '-preset', 'p4'])
+            else:
+                command.extend(['-c:v', 'libx264'])
+
+            command.extend(['-c:a', 'copy'])
+
+            # Determine subtitle codec based on output file extension
+            if args.output_file.lower().endswith('.mp4'):
+                 command.extend(['-c:s', 'mov_text'])
+            else:
+                 command.extend(['-c:s', 'copy'])
+
             command.extend([
-                '-c:v', 'copy',
-                '-c:a', 'copy',
-                '-c:s', 'copy',
                 args.output_file,
                 '-y'
             ])
