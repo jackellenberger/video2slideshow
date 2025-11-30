@@ -2,7 +2,7 @@
 
 This project allows users to input a full motion video file and receive in return a video file that "samples and holds" the original, reducing for example a 24 frames-per-second video into a 4 seconds-per-frame video. The special sauce is that when subtitles are present, it won't give you one frame every 4 seconds, it will give you one frame each time a character speaks, (plus frames every 4 seconds when no one is speaking) so that you can read the facial expressions of characters as they express themselves. Pretty neat.
 
-I made this project because my partner got slonked silly style and can't watch full motion video, but we want to watch boyslove content. I hope it proves useful to others. 
+I made this project because my partner got a concussy slonked silly style and can't watch full motion video, but we want to watch boyslove content. I hope it proves useful to others. 
 
 ### Usage
 
